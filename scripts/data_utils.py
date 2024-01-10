@@ -5,7 +5,6 @@ import json
 import os
 import re
 import requests
-import openai
 import re
 import tempfile
 import time
@@ -14,6 +13,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from typing import Callable, List, Dict, Optional, Generator, Tuple, Union
+from openai import AzureOpenAI
 
 import markdown
 import tiktoken
@@ -611,30 +611,23 @@ def merge_chunks_serially(chunked_content_list: List[str], num_tokens: int) -> G
         yield current_chunk, total_size
 
 
-def get_embedding(text, embedding_model_endpoint=None, embedding_model_key=None, azure_credential=None):
+def get_embedding(text, embedding_model_endpoint=None, embedding_model_key=None):
     endpoint = embedding_model_endpoint if embedding_model_endpoint else os.environ.get("EMBEDDING_MODEL_ENDPOINT")
     key = embedding_model_key if embedding_model_key else os.environ.get("EMBEDDING_MODEL_KEY")
-    
-    if azure_credential is None and (endpoint is None or key is None):
-        raise Exception("EMBEDDING_MODEL_ENDPOINT and EMBEDDING_MODEL_KEY are required for embedding")
 
     try:
         endpoint_parts = endpoint.split("/openai/deployments/")
-        base_url = endpoint_parts[0]
         deployment_id = endpoint_parts[1].split("/embeddings")[0]
-
-        openai.api_version = '2023-05-15'
-        openai.api_base = base_url
-
-        if azure_credential is not None:
-            openai.api_key = azure_credential.get_token("https://cognitiveservices.azure.com/.default").token
-            openai.api_type = "azure_ad"
-        else:
-            openai.api_type = 'azure'
-            openai.api_key = key
-
-        embeddings = openai.Embedding.create(deployment_id=deployment_id, input=text)
-        return embeddings['data'][0]["embedding"]
+        api_version = endpoint_parts[1].split("/embeddings?api-version=")[1]
+     
+        openai = AzureOpenAI(    
+            api_version = api_version,
+            azure_endpoint=endpoint,
+            api_key = key
+        )
+    
+        embeddings = openai.embeddings.create(input=[text], model=deployment_id).data[0].embedding
+        return embeddings
 
     except Exception as e:
         raise Exception(f"Error getting embeddings with endpoint={endpoint} with error={e}")
@@ -734,7 +727,7 @@ def chunk_content(
                 if add_embeddings:
                     for _ in range(RETRY_COUNT):
                         try:
-                            doc.contentVector = get_embedding(chunk, azure_credential=azure_credential, embedding_model_endpoint=embedding_endpoint)
+                            doc.contentVector = get_embedding(chunk, embedding_model_endpoint=embedding_endpoint)
                             break
                         except:
                             time.sleep(30)

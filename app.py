@@ -2,12 +2,11 @@ import json
 import os
 import logging
 import requests
-import openai
 import copy
 from azure.identity import DefaultAzureCredential
-from base64 import b64encode
 from flask import Flask, Response, request, jsonify, send_from_directory
 from dotenv import load_dotenv
+from openai import AzureOpenAI
 
 from backend.auth.auth_utils import get_authenticated_user_details
 from backend.history.cosmosdbservice import CosmosConversationClient
@@ -117,6 +116,17 @@ ELASTICSEARCH_EMBEDDING_MODEL_ID = os.environ.get("ELASTICSEARCH_EMBEDDING_MODEL
 AUTH_ENABLED = os.environ.get("AUTH_ENABLED", "true").lower()
 frontend_settings = { "auth_enabled": AUTH_ENABLED }
 
+# Initalize Azure OpenAI client to maintain parameters from previous version
+# https://github.com/openai/openai-python/blob/main/examples/azure.py
+api_version =  AZURE_OPENAI_PREVIEW_API_VERSION
+base_url = AZURE_OPENAI_ENDPOINT if AZURE_OPENAI_ENDPOINT else f"https://{AZURE_OPENAI_RESOURCE}.openai.azure.com/"
+endpoint = f"{base_url}openai/deployments/{AZURE_OPENAI_MODEL}/chat/completions?api-version={AZURE_OPENAI_PREVIEW_API_VERSION}"
+    
+client = AzureOpenAI(
+    api_version = api_version,
+    azure_endpoint=endpoint,
+    api_key = AZURE_OPENAI_KEY
+)
 
 # Initialize a CosmosDB client with AAD auth and containers for Chat History
 cosmos_conversation_client = None
@@ -161,6 +171,12 @@ def should_use_data():
 
 def format_as_ndjson(obj: dict) -> str:
     return json.dumps(obj, ensure_ascii=False) + "\n"
+
+def parse_multi_columns(columns: str) -> list:
+    if "|" in columns:
+        return columns.split("|")
+    else:
+        return columns.split(",")
 
 def fetchUserGroups(userToken, nextLink=None):
     # Recursively fetch group membership
@@ -244,11 +260,11 @@ def prepare_body_headers_with_data(request):
                     "key": AZURE_SEARCH_KEY,
                     "indexName": AZURE_SEARCH_INDEX,
                     "fieldsMapping": {
-                        "contentFields": AZURE_SEARCH_CONTENT_COLUMNS.split("|") if AZURE_SEARCH_CONTENT_COLUMNS else [],
+                        "contentFields": parse_multi_columns(AZURE_SEARCH_CONTENT_COLUMNS) if AZURE_SEARCH_CONTENT_COLUMNS else [],
                         "titleField": AZURE_SEARCH_TITLE_COLUMN if AZURE_SEARCH_TITLE_COLUMN else None,
                         "urlField": AZURE_SEARCH_URL_COLUMN if AZURE_SEARCH_URL_COLUMN else None,
                         "filepathField": AZURE_SEARCH_FILENAME_COLUMN if AZURE_SEARCH_FILENAME_COLUMN else None,
-                        "vectorFields": AZURE_SEARCH_VECTOR_COLUMNS.split("|") if AZURE_SEARCH_VECTOR_COLUMNS else []
+                        "vectorFields": parse_multi_columns(AZURE_SEARCH_VECTOR_COLUMNS) if AZURE_SEARCH_VECTOR_COLUMNS else []
                     },
                     "inScope": True if AZURE_SEARCH_ENABLE_IN_DOMAIN.lower() == "true" else False,
                     "topNDocuments": AZURE_SEARCH_TOP_K,
@@ -272,11 +288,11 @@ def prepare_body_headers_with_data(request):
                     "databaseName": AZURE_COSMOSDB_MONGO_VCORE_DATABASE,
                     "containerName": AZURE_COSMOSDB_MONGO_VCORE_CONTAINER,                    
                     "fieldsMapping": {
-                        "contentFields": AZURE_COSMOSDB_MONGO_VCORE_CONTENT_COLUMNS.split("|") if AZURE_COSMOSDB_MONGO_VCORE_CONTENT_COLUMNS else [],
+                        "contentFields": parse_multi_columns(AZURE_COSMOSDB_MONGO_VCORE_CONTENT_COLUMNS) if AZURE_COSMOSDB_MONGO_VCORE_CONTENT_COLUMNS else [],
                         "titleField": AZURE_COSMOSDB_MONGO_VCORE_TITLE_COLUMN if AZURE_COSMOSDB_MONGO_VCORE_TITLE_COLUMN else None,
                         "urlField": AZURE_COSMOSDB_MONGO_VCORE_URL_COLUMN if AZURE_COSMOSDB_MONGO_VCORE_URL_COLUMN else None,
                         "filepathField": AZURE_COSMOSDB_MONGO_VCORE_FILENAME_COLUMN if AZURE_COSMOSDB_MONGO_VCORE_FILENAME_COLUMN else None,
-                        "vectorFields": AZURE_COSMOSDB_MONGO_VCORE_VECTOR_COLUMNS.split("|") if AZURE_COSMOSDB_MONGO_VCORE_VECTOR_COLUMNS else []
+                        "vectorFields": parse_multi_columns(AZURE_COSMOSDB_MONGO_VCORE_VECTOR_COLUMNS) if AZURE_COSMOSDB_MONGO_VCORE_VECTOR_COLUMNS else []
                     },
                     "inScope": True if AZURE_COSMOSDB_MONGO_VCORE_ENABLE_IN_DOMAIN.lower() == "true" else False,
                     "topNDocuments": AZURE_COSMOSDB_MONGO_VCORE_TOP_K,
@@ -304,11 +320,11 @@ def prepare_body_headers_with_data(request):
                             "encodedApiKey": ELASTICSEARCH_ENCODED_API_KEY,
                             "indexName": ELASTICSEARCH_INDEX,
                             "fieldsMapping": {
-                                "contentFields": ELASTICSEARCH_CONTENT_COLUMNS.split("|") if ELASTICSEARCH_CONTENT_COLUMNS else [],
+                                "contentFields": parse_multi_columns(ELASTICSEARCH_CONTENT_COLUMNS) if ELASTICSEARCH_CONTENT_COLUMNS else [],
                                 "titleField": ELASTICSEARCH_TITLE_COLUMN if ELASTICSEARCH_TITLE_COLUMN else None,
                                 "urlField": ELASTICSEARCH_URL_COLUMN if ELASTICSEARCH_URL_COLUMN else None,
                                 "filepathField": ELASTICSEARCH_FILENAME_COLUMN if ELASTICSEARCH_FILENAME_COLUMN else None,
-                                "vectorFields": ELASTICSEARCH_VECTOR_COLUMNS.split("|") if ELASTICSEARCH_VECTOR_COLUMNS else []
+                                "vectorFields": parse_multi_columns(ELASTICSEARCH_VECTOR_COLUMNS) if ELASTICSEARCH_VECTOR_COLUMNS else []
                             },
                             "inScope": True if ELASTICSEARCH_ENABLE_IN_DOMAIN.lower() == "true" else False,
                             "topNDocuments": int(ELASTICSEARCH_TOP_K),
@@ -360,9 +376,9 @@ def stream_with_data(body, headers, endpoint, history_metadata={}):
             for line in r.iter_lines(chunk_size=10):
                 response = {
                     "id": "",
-                    "model": "",
-                    "created": 0,
                     "object": "",
+                    "created": 0,
+                    "model": "",
                     "choices": [{
                         "messages": []
                     }],
@@ -506,18 +522,18 @@ def conversation_with_data(request_body):
 def stream_without_data(response, history_metadata={}):
     responseText = ""
     for line in response:
-        if line["choices"]:
-            deltaText = line["choices"][0]["delta"].get('content')
+        if line.choices:
+            deltaText = line.choices[0].delta.content
         else:
             deltaText = ""
         if deltaText and deltaText != "[DONE]":
             responseText = deltaText
 
         response_obj = {
-            "id": line["id"],
-            "model": line["model"],
-            "created": line["created"],
-            "object": line["object"],
+            "id": line.id,
+            "model": line.model,
+            "created": line.created,
+            "object": line.object,
             "choices": [{
                 "messages": [{
                     "role": "assistant",
@@ -528,13 +544,7 @@ def stream_without_data(response, history_metadata={}):
         }
         yield format_as_ndjson(response_obj)
 
-
 def conversation_without_data(request_body):
-    openai.api_type = "azure"
-    openai.api_base = AZURE_OPENAI_ENDPOINT if AZURE_OPENAI_ENDPOINT else f"https://{AZURE_OPENAI_RESOURCE}.openai.azure.com/"
-    openai.api_version = "2023-08-01-preview"
-    openai.api_key = AZURE_OPENAI_KEY
-
     request_messages = request_body["messages"]
     messages = [
         {
@@ -542,24 +552,24 @@ def conversation_without_data(request_body):
             "content": AZURE_OPENAI_SYSTEM_MESSAGE
         }
     ]
-
+ 
     for message in request_messages:
         if message:
             messages.append({
                 "role": message["role"] ,
                 "content": message["content"]
             })
-
-    response = openai.ChatCompletion.create(
-        engine=AZURE_OPENAI_MODEL,
+ 
+    response = client.chat.completions.create(
+        model=AZURE_OPENAI_MODEL,
         messages = messages,
         temperature=float(AZURE_OPENAI_TEMPERATURE),
         max_tokens=int(AZURE_OPENAI_MAX_TOKENS),
         top_p=float(AZURE_OPENAI_TOP_P),
         stop=AZURE_OPENAI_STOP_SEQUENCE.split("|") if AZURE_OPENAI_STOP_SEQUENCE else None,
-        stream=SHOULD_STREAM
-    )
-
+        stream=SHOULD_STREAM,        
+        )
+ 
     history_metadata = request_body.get("history_metadata", {})
 
     if not SHOULD_STREAM:
@@ -580,7 +590,6 @@ def conversation_without_data(request_body):
         return jsonify(response_obj), 200
     else:
         return Response(stream_without_data(response, history_metadata), mimetype='text/event-stream')
-
 
 @app.route("/conversation", methods=["GET", "POST"])
 def conversation():
@@ -851,21 +860,16 @@ def generate_title(conversation_messages):
 
     try:
         ## Submit prompt to Chat Completions for response
-        base_url = AZURE_OPENAI_ENDPOINT if AZURE_OPENAI_ENDPOINT else f"https://{AZURE_OPENAI_RESOURCE}.openai.azure.com/"
-        openai.api_type = "azure"
-        openai.api_base = base_url
-        openai.api_version = "2023-03-15-preview"
-        openai.api_key = AZURE_OPENAI_KEY
-        completion = openai.ChatCompletion.create(    
-            engine=AZURE_OPENAI_MODEL,
+        completion = client.chat.completions.create(    
+            model=AZURE_OPENAI_MODEL,
             messages=messages,
             temperature=1,
             max_tokens=64 
         )
-        title = json.loads(completion['choices'][0]['message']['content'])['title']
+        title = completion.choices[0].message.content.title()
         return title
     except Exception as e:
-        return messages[-2]['content']
+        return messages[-2].content
 
 if __name__ == "__main__":
     app.run()
